@@ -146,10 +146,34 @@ jobs:
             bash scripts/persistence-test.sh
           else
             echo "Testing PostgreSQL persistence..."
+            DB_USER="${POSTGRES_USER:-taskflow_user}"
+            DB_NAME="${POSTGRES_DB:-taskflow}"
+            PERSIST_EMAIL="persistence-check-$(date +%s)@example.com"
+            docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -c \
+              "INSERT INTO users (name, email, password_hash) VALUES ('Persistence Tester', '$PERSIST_EMAIL', 'hashed_pw_test');"
             docker compose restart postgres
-            sleep 5
-            curl --fail --silent http://localhost:3000/health || (echo "Postgres failed after restart" && exit 1)
-            echo "PostgreSQL persistence check passed"
+            for i in $(seq 1 30); do
+              if docker compose exec -T postgres pg_isready -U "$DB_USER" -d "$DB_NAME"; then
+                echo "PostgreSQL is accepting connections ($i/30)"
+                break
+              fi
+              sleep 2
+            done
+            for i in $(seq 1 30); do
+              if curl --fail --silent http://localhost:3000/health > /dev/null; then
+                echo "Backend /health returned 200 OK after PostgreSQL restart ($i/30)"
+                break
+              fi
+              sleep 2
+            done
+            FOUND=$(docker compose exec -T postgres psql -U "$DB_USER" -d "$DB_NAME" -t -A -c \
+              "SELECT email FROM users WHERE email = '$PERSIST_EMAIL';")
+            if [ "$FOUND" = "$PERSIST_EMAIL" ]; then
+              echo "PostgreSQL persistence check passed! Record '$FOUND' survived restart."
+            else
+              echo "PostgreSQL persistence check failed! Record '$PERSIST_EMAIL' not found."
+              exit 1
+            fi
           fi
 
       - name: Capture container status and logs
